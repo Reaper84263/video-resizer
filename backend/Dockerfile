@@ -5,9 +5,12 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY backend ./backend
-COPY package.json ./package.json
 
 EXPOSE 3001
 

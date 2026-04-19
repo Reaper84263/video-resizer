@@ -65,6 +65,16 @@
 
         <div id="jobMeta" class="status hidden"></div>
 
+        <div id="progressWrap" class="progress-wrap hidden" aria-live="polite">
+          <div class="progress-head">
+            <span id="progressLabel">Waiting to start</span>
+            <span id="progressPercent">0%</span>
+          </div>
+          <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-labelledby="progressLabel">
+            <div id="progressFill" class="progress-fill"></div>
+          </div>
+        </div>
+
         <a id="downloadLink" class="download hidden" download="resized.mp4">Download processed video</a>
       </section>
     </main>

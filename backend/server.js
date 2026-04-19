@@ -27,6 +27,14 @@ const FFMPEG_CANDIDATES = [
   ),
   'ffmpeg'
 ].filter(Boolean);
+const FFPROBE_CANDIDATES = [
+  process.env.FFPROBE_PATH,
+  ...(process.env.FFMPEG_PATH
+    ? [path.join(path.dirname(process.env.FFMPEG_PATH), 'ffprobe')]
+    : []),
+  'ffprobe'
+].filter(Boolean);
+const GPU_ENABLED = /^(1|true|yes)$/i.test(process.env.FFMPEG_USE_NVIDIA || '');
 
 const json = (res, statusCode, payload) => {
   res.writeHead(statusCode, {
@@ -87,6 +95,27 @@ const writeJob = async (job) => {
   await fsp.writeFile(jobPath(job.id), JSON.stringify(job, null, 2));
 };
 
+const clampProgress = (value) => {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+};
+
+const resolveBinaryPath = async (candidates) => {
+  for (const candidate of candidates) {
+    try {
+      if (!candidate.includes(path.sep) && !candidate.includes('/')) {
+        return candidate;
+      }
+      await fsp.access(candidate);
+      return candidate;
+    } catch (_error) {
+      // Try next candidate.
+    }
+  }
+
+  return candidates[candidates.length - 1];
+};
+
 const createScaleFilter = ({ width, height, fitMode }) => {
   if (fitMode === 'stretch') {
     return `scale=${width}:${height}`;
@@ -99,6 +128,122 @@ const createScaleFilter = ({ width, height, fitMode }) => {
   return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
 };
 
+const createVideoEncodingArgs = (useNvidia) => {
+  if (useNvidia) {
+    return [
+      '-c:v',
+      'h264_nvenc',
+      '-preset',
+      'p4',
+      '-cq',
+      '23'
+    ];
+  }
+
+  return [
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-crf',
+    '23'
+  ];
+};
+
+const shouldRetryOnCpu = (stderr) =>
+  /h264_nvenc|nvenc|cuda|libcuda|no capable devices found|cannot load/i.test(stderr || '');
+
+const runFfmpegJob = ({ ffmpegPath, job, durationSeconds, useNvidia }) =>
+  new Promise((resolve, reject) => {
+    const ffmpegArgs = [
+      '-y',
+      '-i',
+      job.inputPath,
+      '-vf',
+      createScaleFilter(job.output),
+      ...createVideoEncodingArgs(useNvidia),
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      '-movflags',
+      '+faststart',
+      '-progress',
+      'pipe:1',
+      '-nostats',
+      job.outputPath
+    ];
+
+    const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+      windowsHide: true
+    });
+
+    let stderr = '';
+    let stdout = '';
+    let lastReportedProgress = -1;
+
+    ffmpeg.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    ffmpeg.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+      const lines = stdout.split(/\r?\n/);
+      stdout = lines.pop() || '';
+
+      for (const line of lines) {
+        const [key, rawValue] = line.split('=');
+        if (!key || !rawValue) continue;
+
+        if (key === 'out_time_ms') {
+          const outTimeMs = Number.parseInt(rawValue, 10);
+          if (!Number.isFinite(outTimeMs) || outTimeMs < 0) continue;
+
+          const percentage = clampProgress((outTimeMs / (durationSeconds * 1000000)) * 100);
+          const roundedPercentage = Math.floor(percentage);
+
+          if (roundedPercentage <= lastReportedProgress) continue;
+          lastReportedProgress = roundedPercentage;
+
+          markJob(job.id, {
+            state: 'processing',
+            message: `${useNvidia ? 'Processing with NVIDIA encoder' : 'Processing video'}... ${roundedPercentage}%`,
+            progress: {
+              phase: 'processing',
+              percentage: roundedPercentage
+            }
+          }).catch(() => {
+            // Best-effort progress updates should not crash the worker.
+          });
+        }
+      }
+    });
+
+    ffmpeg.on('error', reject);
+    ffmpeg.on('close', (code) => {
+      if (code === 0) {
+        resolve({ usedNvidia: useNvidia });
+        return;
+      }
+
+      const lastLine =
+        stderr
+          .trim()
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .slice(-1)[0] || 'FFmpeg exited with a non-zero code.';
+
+      reject(
+        Object.assign(new Error(lastLine), {
+          stderr,
+          useNvidia
+        })
+      );
+    });
+  });
+
 const markJob = async (jobId, patch) => {
   const job = await readJob(jobId);
   const next = {
@@ -110,83 +255,120 @@ const markJob = async (jobId, patch) => {
   return next;
 };
 
+const getDurationSeconds = async (inputPath) => {
+  const ffprobePath = await resolveBinaryPath(FFPROBE_CANDIDATES);
+
+  return new Promise((resolve, reject) => {
+    const ffprobe = spawn(
+      ffprobePath,
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        inputPath
+      ],
+      { windowsHide: true }
+    );
+
+    let stdout = '';
+    let stderr = '';
+
+    ffprobe.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    ffprobe.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    ffprobe.on('error', reject);
+    ffprobe.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || 'ffprobe failed to read media duration.'));
+        return;
+      }
+
+      const durationSeconds = Number.parseFloat(stdout.trim());
+      if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+        reject(new Error('ffprobe returned an invalid media duration.'));
+        return;
+      }
+
+      resolve(durationSeconds);
+    });
+  });
+};
+
 const processJob = async (jobId) => {
   let job = await markJob(jobId, {
     state: 'processing',
-    message: 'FFmpeg worker started.'
+    message: GPU_ENABLED ? 'FFmpeg worker started. Trying NVIDIA encoder.' : 'FFmpeg worker started.',
+    progress: {
+      phase: 'processing',
+      percentage: 0
+    }
   });
   const ffmpegPath = await resolveFfmpegPath();
+  const durationSeconds = await getDurationSeconds(job.inputPath);
+  try {
+    let result;
 
-  const ffmpegArgs = [
-    '-y',
-    '-i',
-    job.inputPath,
-    '-vf',
-    createScaleFilter(job.output),
-    '-threads',
-    '2',
-    '-c:v',
-    'libx264',
-    '-preset',
-    'fast',
-    '-crf',
-    '23',
-    '-pix_fmt',
-    'yuv420p',
-    '-c:a',
-    'aac',
-    '-b:a',
-    '128k',
-    '-movflags',
-    '+faststart',
-    job.outputPath
-  ];
+    try {
+      result = await runFfmpegJob({
+        ffmpegPath,
+        job,
+        durationSeconds,
+        useNvidia: GPU_ENABLED
+      });
+    } catch (error) {
+      if (!GPU_ENABLED || !shouldRetryOnCpu(error.stderr)) {
+        throw error;
+      }
 
-  const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
-    windowsHide: true
-  });
+      await markJob(jobId, {
+        state: 'processing',
+        message: 'NVIDIA encoder unavailable in the container. Falling back to CPU encoding.',
+        progress: {
+          phase: 'processing',
+          percentage: 0
+        }
+      });
 
-  let stderr = '';
+      result = await runFfmpegJob({
+        ffmpegPath,
+        job,
+        durationSeconds,
+        useNvidia: false
+      });
+    }
 
-  ffmpeg.stderr.on('data', (chunk) => {
-    stderr += chunk.toString();
-  });
-
-  ffmpeg.on('error', async (error) => {
+    await markJob(jobId, {
+      state: 'completed',
+      message: result.usedNvidia ? 'Processing complete with NVIDIA encoder.' : 'Processing complete.',
+      progress: {
+        phase: 'completed',
+        percentage: 100
+      },
+      downloadUrl: `${BASE_URL}/downloads/${jobId}`,
+      filename: path.basename(job.outputPath)
+    });
+  } catch (error) {
     await markJob(jobId, {
       state: 'failed',
-      message: 'FFmpeg could not be started.',
+      message: error.code === 'ENOENT' ? 'FFmpeg could not be started.' : 'Processing failed.',
+      progress: {
+        phase: 'failed',
+        percentage: 0
+      },
       error:
         error.code === 'ENOENT'
           ? 'FFmpeg is not available to the backend process. Set FFMPEG_PATH or restart the backend shell after installation.'
           : error.message
     });
-  });
-
-  ffmpeg.on('close', async (code) => {
-    if (code === 0) {
-      await markJob(jobId, {
-        state: 'completed',
-        message: 'Processing complete.',
-        downloadUrl: `${BASE_URL}/downloads/${jobId}`,
-        filename: path.basename(job.outputPath)
-      });
-      return;
-    }
-
-    const lastLine =
-      stderr
-        .trim()
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .slice(-1)[0] || 'FFmpeg exited with a non-zero code.';
-
-    await markJob(jobId, {
-      state: 'failed',
-      message: 'Processing failed.',
-      error: lastLine
-    });
-  });
+  }
 };
 
 const collectJsonBody = (req) =>
@@ -248,6 +430,10 @@ const handleCreateJob = async (req, res) => {
       height: output.height,
       fitMode: output.fitMode || 'contain'
     },
+    progress: {
+      phase: 'waiting_for_upload',
+      percentage: 0
+    },
     inputPath,
     outputPath
   };
@@ -275,7 +461,11 @@ const handleUpload = async (req, res, jobId) => {
 
   await markJob(jobId, {
     state: 'uploading',
-    message: 'Upload in progress.'
+    message: 'Upload in progress.',
+    progress: {
+      phase: 'uploading',
+      percentage: 0
+    }
   });
 
   await fsp.mkdir(path.dirname(job.inputPath), { recursive: true });
@@ -288,6 +478,10 @@ const handleUpload = async (req, res, jobId) => {
     await markJob(jobId, {
       state: 'failed',
       message: 'Upload failed.',
+      progress: {
+        phase: 'failed',
+        percentage: 0
+      },
       error: 'Could not write the uploaded file to disk.'
     });
     sendText(res, 500, 'Upload failed.');
@@ -296,7 +490,11 @@ const handleUpload = async (req, res, jobId) => {
   fileStream.on('finish', async () => {
     await markJob(jobId, {
       state: 'queued',
-      message: 'Upload complete. Waiting for FFmpeg.'
+      message: 'Upload complete. Waiting for FFmpeg.',
+      progress: {
+        phase: 'queued',
+        percentage: 0
+      }
     });
 
     sendText(res, 200, 'Upload complete.');
@@ -304,6 +502,10 @@ const handleUpload = async (req, res, jobId) => {
       await markJob(jobId, {
         state: 'failed',
         message: 'Processing failed.',
+        progress: {
+          phase: 'failed',
+          percentage: 0
+        },
         error: error.message
       });
     });
@@ -318,6 +520,7 @@ const handleGetJob = async (res, jobId) => {
     state: job.state,
     message: job.message,
     error: job.error,
+    progress: job.progress,
     downloadUrl: job.downloadUrl,
     filename: job.filename
   });
@@ -366,7 +569,8 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, {
         ok: true,
         ffmpegCandidates: FFMPEG_CANDIDATES,
-        note: 'The backend is running. Processing uses ffmpeg from PATH or FFMPEG_PATH, with a WinGet fallback on this machine.'
+        gpuEnabled: GPU_ENABLED,
+        note: 'The backend is running. Processing uses ffmpeg from PATH or FFMPEG_PATH, with optional NVIDIA encoding when enabled for the container.'
       });
       return;
     }

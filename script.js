@@ -9,6 +9,10 @@ const fitMode = document.getElementById('fitMode');
 const resizeBtn = document.getElementById('resizeBtn');
 const statusEl = document.getElementById('status');
 const jobMetaEl = document.getElementById('jobMeta');
+const progressWrap = document.getElementById('progressWrap');
+const progressLabel = document.getElementById('progressLabel');
+const progressPercent = document.getElementById('progressPercent');
+const progressFill = document.getElementById('progressFill');
 const downloadLink = document.getElementById('downloadLink');
 
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024;
@@ -38,6 +42,23 @@ const setJobMeta = (message) => {
     jobMetaEl.textContent = '';
     jobMetaEl.classList.add('hidden');
   }
+};
+
+const setProgress = (percentage, label) => {
+  const safePercentage = Math.max(0, Math.min(100, Math.round(percentage || 0)));
+  progressWrap.classList.remove('hidden');
+  progressLabel.textContent = label || 'Working...';
+  progressPercent.textContent = `${safePercentage}%`;
+  progressFill.style.width = `${safePercentage}%`;
+  progressFill.parentElement.setAttribute('aria-valuenow', String(safePercentage));
+};
+
+const hideProgress = () => {
+  progressWrap.classList.add('hidden');
+  progressLabel.textContent = 'Waiting to start';
+  progressPercent.textContent = '0%';
+  progressFill.style.width = '0%';
+  progressFill.parentElement.setAttribute('aria-valuenow', '0');
 };
 
 const clearObjectUrl = (url) => {
@@ -90,6 +111,7 @@ const resetJobState = () => {
   clearPolling();
   currentJobId = undefined;
   setJobMeta('');
+  hideProgress();
   resetDownloadState();
 };
 
@@ -163,6 +185,7 @@ const updateSelectedFile = (file) => {
   resizeBtn.disabled = false;
   setStatus(`Loaded: ${selectedFile.name} (${formatFileSize(selectedFile.size)}).`);
   setJobMeta('Ready to create a remote processing job.');
+  setProgress(0, 'Ready to upload');
 };
 
 const getResizePayload = () => {
@@ -222,6 +245,7 @@ const uploadFileToJob = (file, job) =>
       if (!event.lengthComputable) return;
       const percent = Math.round((event.loaded / event.total) * 100);
       setStatus(`Uploading video... ${percent}%`);
+      setProgress(percent, 'Uploading video');
     };
 
     xhr.onerror = () => reject(new Error('Upload failed.'));
@@ -258,6 +282,20 @@ const pollJob = async (job) => {
     setJobMeta(`Job ${job.jobId}: ${state}`);
   }
 
+  const progress = payload.progress || {};
+  const percentage = Number.isFinite(progress.percentage) ? progress.percentage : state === 'completed' ? 100 : 0;
+  const phaseLabel =
+    progress.phase === 'uploading'
+      ? 'Uploading video'
+      : progress.phase === 'queued'
+        ? 'Queued for processing'
+        : progress.phase === 'completed'
+          ? 'Completed'
+          : progress.phase === 'failed'
+            ? 'Failed'
+            : 'Processing video';
+  setProgress(percentage, phaseLabel);
+
   if (state === 'completed') {
     const downloadUrl = payload.downloadUrl || payload.outputUrl;
     if (!downloadUrl) {
@@ -267,6 +305,7 @@ const pollJob = async (job) => {
     downloadLink.href = downloadUrl;
     downloadLink.download = payload.filename || 'resized.mp4';
     downloadLink.classList.remove('hidden');
+    setProgress(100, 'Completed');
     setStatus('Done! Your processed video is ready to download.');
     return;
   }
@@ -294,6 +333,7 @@ const queueRemoteResize = async () => {
   try {
     const resize = getResizePayload();
     setStatus('Creating remote job...');
+    setProgress(0, 'Creating job');
     const job = await createRemoteJob(selectedFile, resize);
 
     currentJobId = job.jobId || job.id;

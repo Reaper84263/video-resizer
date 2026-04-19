@@ -134,6 +134,41 @@ button:disabled {
   min-height: 1.25rem;
 }
 
+.progress-wrap {
+  margin-top: 1rem;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid #2f3352;
+  border-radius: 14px;
+  background: rgba(11, 14, 30, 0.75);
+}
+
+.progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.55rem;
+  color: #d9defa;
+  font-size: 0.95rem;
+}
+
+.progress-track {
+  width: 100%;
+  height: 12px;
+  border-radius: 999px;
+  background: #1a1f3b;
+  overflow: hidden;
+  border: 1px solid #32385e;
+}
+
+.progress-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4f7cff, #37c8ff);
+  transition: width 220ms ease;
+}
+
 .download {
   margin-top: 1rem;
   display: inline-flex;

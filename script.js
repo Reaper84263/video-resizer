@@ -12,6 +12,7 @@ const fitMode = document.getElementById('fitMode');
 const resizeBtn = document.getElementById('resizeBtn');
 const statusEl = document.getElementById('status');
 const downloadLink = document.getElementById('downloadLink');
+const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024;
 
 let ffmpeg;
 let selectedFile;
@@ -28,6 +29,22 @@ const clearObjectUrl = (url) => {
   if (url) {
     URL.revokeObjectURL(url);
   }
+};
+
+const formatFileSize = (bytes) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = bytes;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = size >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
 };
 
 const rememberFfmpegMessage = (message) => {
@@ -171,11 +188,28 @@ const handleSelectedFile = (file) => {
     return;
   }
 
+  if (selectedFile.size > MAX_FILE_SIZE_BYTES) {
+    const maxSizeText = formatFileSize(MAX_FILE_SIZE_BYTES);
+    const selectedSizeText = formatFileSize(selectedFile.size);
+    selectedFile = undefined;
+    videoInput.value = '';
+    preview.removeAttribute('src');
+    previewWrap.classList.add('hidden');
+    resizeBtn.disabled = true;
+    setStatus(`This file is ${selectedSizeText}. The experimental upload cap is ${maxSizeText}.`);
+    return;
+  }
+
   previewUrl = URL.createObjectURL(selectedFile);
   preview.src = previewUrl;
   previewWrap.classList.remove('hidden');
   resizeBtn.disabled = false;
-  setStatus(`Loaded: ${selectedFile.name}`);
+  const selectedSizeText = formatFileSize(selectedFile.size);
+  if (selectedFile.size > 250 * 1024 * 1024) {
+    setStatus(`Loaded: ${selectedFile.name} (${selectedSizeText}). Large files may still fail in-browser even though uploads up to 2 GB are allowed.`);
+  } else {
+    setStatus(`Loaded: ${selectedFile.name} (${selectedSizeText}).`);
+  }
 };
 
 const getScaleFilter = ({ width, height, mode }) => {

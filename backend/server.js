@@ -15,7 +15,6 @@ const INPUTS_DIR = path.join(DATA_ROOT, 'inputs');
 const OUTPUTS_DIR = path.join(DATA_ROOT, 'outputs');
 const FFMPEG_CANDIDATES = [
   process.env.FFMPEG_PATH,
-  'ffmpeg',
   path.join(
     process.env.LOCALAPPDATA || '',
     'Microsoft',
@@ -25,7 +24,8 @@ const FFMPEG_CANDIDATES = [
     'ffmpeg-8.1-full_build',
     'bin',
     'ffmpeg.exe'
-  )
+  ),
+  'ffmpeg'
 ].filter(Boolean);
 
 const json = (res, statusCode, payload) => {
@@ -55,12 +55,10 @@ const sanitizeFilename = (name) => {
 
 const resolveFfmpegPath = async () => {
   for (const candidate of FFMPEG_CANDIDATES) {
-    if (candidate === 'ffmpeg') {
-      return candidate;
-    }
-
     try {
-      await fsp.access(candidate);
+      if (candidate !== 'ffmpeg') {
+        await fsp.access(candidate);
+      }
       return candidate;
     } catch (_error) {
       // Try next candidate.

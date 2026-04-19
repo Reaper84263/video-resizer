@@ -190,6 +190,170 @@ const getScaleFilter = ({ width, height, mode }) => {
   return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
 };
 
+const roundToEven = (value) => Math.max(32, Math.round(value / 2) * 2);
+
+const getFallbackDimensions = (width, height) => {
+  const maxEdge = 854;
+  const longestEdge = Math.max(width, height);
+
+  if (longestEdge <= maxEdge) {
+    return { width, height };
+  }
+
+  const ratio = maxEdge / longestEdge;
+  return {
+    width: roundToEven(width * ratio),
+    height: roundToEven(height * ratio)
+  };
+};
+
+const buildEncodeArgs = ({
+  inputName,
+  outputName,
+  width,
+  height,
+  mode,
+  crf,
+  preset,
+  audioBitrate,
+  frameRate,
+  includeAudio
+}) => {
+  const args = [
+    '-i',
+    inputName,
+    '-vf',
+    getScaleFilter({ width, height, mode }),
+    '-threads',
+    '1',
+    '-r',
+    String(frameRate),
+    '-c:v',
+    'libx264',
+    '-preset',
+    preset,
+    '-crf',
+    String(crf),
+    '-pix_fmt',
+    'yuv420p'
+  ];
+
+  if (includeAudio) {
+    args.push('-c:a', 'aac', '-b:a', audioBitrate);
+  } else {
+    args.push('-an');
+  }
+
+  args.push('-movflags', '+faststart', outputName);
+  return args;
+};
+
+const isMemoryAbort = (error) => {
+  const message = `${describeError(error)} ${getLastMeaningfulLog()}`.toLowerCase();
+  return message.includes('aborted') || message.includes('memory') || message.includes('out of bounds');
+};
+
+const tryEncodeProfile = async (ff, profile) => {
+  rememberFfmpegMessage(`Trying ${profile.label}...`);
+  setStatus(profile.status);
+
+  const exitCode = await ff.exec(
+    buildEncodeArgs({
+      inputName: profile.inputName,
+      outputName: profile.outputName,
+      width: profile.width,
+      height: profile.height,
+      mode: profile.mode,
+      crf: profile.crf,
+      preset: profile.preset,
+      audioBitrate: profile.audioBitrate,
+      frameRate: profile.frameRate,
+      includeAudio: profile.includeAudio
+    })
+  );
+
+  if (exitCode !== 0) {
+    throw new Error(getLastMeaningfulLog() || `FFmpeg exited with code ${exitCode}`);
+  }
+
+  const data = await ff.readFile(profile.outputName);
+  if (!(data instanceof Uint8Array) || data.byteLength === 0) {
+    throw new Error('The resized video came back empty.');
+  }
+
+  return data;
+};
+
+const resizeWithFallbacks = async (ff, options) => {
+  const reduced = getFallbackDimensions(options.width, options.height);
+  const profiles = [
+    {
+      ...options,
+      label: 'standard resize',
+      status: 'Resizing video...',
+      crf: 24,
+      preset: 'ultrafast',
+      audioBitrate: '96k',
+      frameRate: 30,
+      includeAudio: true,
+      finalWidth: options.width,
+      finalHeight: options.height
+    },
+    {
+      ...options,
+      label: 'memory saver resize',
+      status: 'Retrying with memory saver settings...',
+      crf: 30,
+      preset: 'ultrafast',
+      audioBitrate: '64k',
+      frameRate: 24,
+      includeAudio: false,
+      finalWidth: options.width,
+      finalHeight: options.height
+    }
+  ];
+
+  if (reduced.width !== options.width || reduced.height !== options.height) {
+    profiles.push({
+      ...options,
+      width: reduced.width,
+      height: reduced.height,
+      label: 'smaller fallback resize',
+      status: `Retrying at a smaller size (${reduced.width}x${reduced.height})...`,
+      crf: 30,
+      preset: 'ultrafast',
+      audioBitrate: '64k',
+      frameRate: 24,
+      includeAudio: false,
+      finalWidth: reduced.width,
+      finalHeight: reduced.height
+    });
+  }
+
+  let lastError;
+
+  for (const profile of profiles) {
+    try {
+      const data = await tryEncodeProfile(ff, profile);
+      return {
+        data,
+        width: profile.finalWidth,
+        height: profile.finalHeight,
+        usedFallback: profile.label !== 'standard resize'
+      };
+    } catch (error) {
+      lastError = error;
+      await deleteTempFile(ff, profile.outputName);
+
+      if (!isMemoryAbort(error)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError;
+};
+
 const loadFfmpeg = async () => {
   if (ffmpeg) return ffmpeg;
 
@@ -267,51 +431,26 @@ resizeBtn.addEventListener('click', async () => {
 
     await ff.writeFile(inputName, await fetchFile(selectedFile));
 
-    const vf = getScaleFilter({ width, height, mode: fitMode.value });
-
-    setStatus('Resizing video...');
-    const exitCode = await ff.exec([
-      '-i',
+    const result = await resizeWithFallbacks(ff, {
       inputName,
-      '-vf',
-      vf,
-      '-threads',
-      '1',
-      '-c:v',
-      'libx264',
-      '-preset',
-      'ultrafast',
-      '-crf',
-      '24',
-      '-pix_fmt',
-      'yuv420p',
-      '-c:a',
-      'aac',
-      '-b:a',
-      '96k',
-      '-movflags',
-      '+faststart',
-      outputName
-    ]);
-
-    if (exitCode !== 0) {
-      throw new Error(getLastMeaningfulLog() || `FFmpeg exited with code ${exitCode}`);
-    }
-
-    const data = await ff.readFile(outputName);
-
-    if (!(data instanceof Uint8Array) || data.byteLength === 0) {
-      throw new Error('The resized video came back empty.');
-    }
+      outputName,
+      width,
+      height,
+      mode: fitMode.value
+    });
 
     clearObjectUrl(outputUrl);
-    outputUrl = URL.createObjectURL(new Blob([data], { type: 'video/mp4' }));
+    outputUrl = URL.createObjectURL(new Blob([result.data], { type: 'video/mp4' }));
 
     downloadLink.href = outputUrl;
-    downloadLink.download = outputName;
+    downloadLink.download = `resized_${result.width}x${result.height}.mp4`;
     downloadLink.classList.remove('hidden');
 
-    setStatus('Done! Your resized video is ready to download.');
+    if (result.usedFallback) {
+      setStatus(`Done! Your resized video is ready. A lighter fallback mode was used (${result.width}x${result.height}).`);
+    } else {
+      setStatus('Done! Your resized video is ready to download.');
+    }
 
     await deleteTempFile(ff, inputName);
     await deleteTempFile(ff, outputName);

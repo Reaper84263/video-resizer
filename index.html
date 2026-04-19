@@ -3,22 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Video Resizer</title>
+    <title>Video Resizer Queue</title>
     <link rel="stylesheet" href="styles.css" />
-    <script src="./vendor/ffmpeg/ffmpeg-util.js"></script>
-    <script src="./vendor/ffmpeg/ffmpeg.js"></script>
   </head>
   <body>
     <main class="app">
       <header>
-        <h1>Video Resizer</h1>
-        <p>Resize videos in your browser and download the converted file.</p>
+        <h1>Video Resizer Queue</h1>
+        <p>Upload large videos, hand them off to a processing backend, and download the finished result when the job completes.</p>
       </header>
 
       <section class="card">
         <label id="dropZone" class="file-input" for="videoInput">
           <span class="file-input-title">Select or drop a video</span>
-          <span class="file-input-subtitle">Drag a video file here, or click to browse. Files up to 2 GB are allowed experimentally.</span>
+          <span class="file-input-subtitle">Drag a video file here, or click to browse. This frontend is prepared for uploads up to 10 GB when connected to a large-file backend.</span>
           <input id="videoInput" type="file" accept="video/*" />
         </label>
 
@@ -60,15 +58,18 @@
             </label>
           </div>
 
-          <button id="resizeBtn" disabled>Resize Video</button>
+          <button id="resizeBtn" disabled>Upload And Queue Resize</button>
         </div>
 
         <div id="status" class="status">Load a video to begin.</div>
 
-        <a id="downloadLink" class="download hidden" download="resized.mp4">Download resized video</a>
+        <div id="jobMeta" class="status hidden"></div>
+
+        <a id="downloadLink" class="download hidden" download="resized.mp4">Download processed video</a>
       </section>
     </main>
 
+    <script src="config.js"></script>
     <script src="script.js"></script>
   </body>
 </html>

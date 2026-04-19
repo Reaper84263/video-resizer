@@ -1,6 +1,3 @@
-const { FFmpeg } = FFmpegWASM;
-const { fetchFile } = FFmpegUtil;
-
 const videoInput = document.getElementById('videoInput');
 const dropZone = document.getElementById('dropZone');
 const preview = document.getElementById('preview');
@@ -11,18 +8,36 @@ const presetSelect = document.getElementById('preset');
 const fitMode = document.getElementById('fitMode');
 const resizeBtn = document.getElementById('resizeBtn');
 const statusEl = document.getElementById('status');
+const jobMetaEl = document.getElementById('jobMeta');
 const downloadLink = document.getElementById('downloadLink');
-const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024;
 
-let ffmpeg;
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024;
+const POLL_INTERVAL_MS = 5000;
+
+const APP_CONFIG = window.APP_CONFIG || {
+  apiBaseUrl: '',
+  createJobPath: '/jobs',
+  defaultStatusPath: '/jobs/{jobId}',
+  uploadMethod: 'PUT'
+};
+
 let selectedFile;
-let outputUrl;
 let previewUrl;
-let lastFfmpegMessage = '';
-let ffmpegLogHistory = [];
+let activePollTimer;
+let currentJobId;
 
 const setStatus = (message) => {
   statusEl.textContent = message;
+};
+
+const setJobMeta = (message) => {
+  if (message) {
+    jobMetaEl.textContent = message;
+    jobMetaEl.classList.remove('hidden');
+  } else {
+    jobMetaEl.textContent = '';
+    jobMetaEl.classList.add('hidden');
+  }
 };
 
 const clearObjectUrl = (url) => {
@@ -47,127 +62,68 @@ const formatFileSize = (bytes) => {
   return `${size.toFixed(digits)} ${units[unitIndex]}`;
 };
 
-const rememberFfmpegMessage = (message) => {
-  if (!message) return;
-
-  lastFfmpegMessage = message;
-
-  const trimmed = message.trim();
-  if (!trimmed) return;
-
-  ffmpegLogHistory.push(trimmed);
-  if (ffmpegLogHistory.length > 12) {
-    ffmpegLogHistory = ffmpegLogHistory.slice(-12);
-  }
-};
-
-const getLastMeaningfulLog = () => {
-  for (let index = ffmpegLogHistory.length - 1; index >= 0; index -= 1) {
-    const message = ffmpegLogHistory[index];
-    if (
-      message &&
-      !message.includes('time=') &&
-      !message.includes('frame=') &&
-      !message.startsWith('video:')
-    ) {
-      return message;
-    }
-  }
-
-  return lastFfmpegMessage;
-};
-
-const deleteTempFile = async (ff, path) => {
-  try {
-    await ff.deleteFile(path);
-  } catch (_error) {
-    // Ignore cleanup failures for files that were never created.
-  }
-};
-
 const describeError = (error) => {
-  if (!error) return '';
+  if (!error) return 'Unknown error';
   if (typeof error === 'string') return error;
+  if (error instanceof Error) return error.message || error.name;
 
-  if (error instanceof Error) {
-    return error.message || error.name;
+  try {
+    return JSON.stringify(error);
+  } catch (_jsonError) {
+    return String(error);
   }
-
-  if (typeof error === 'object') {
-    const candidates = [
-      error.message,
-      error.reason,
-      error.type,
-      error.name,
-      error.target && error.target.src,
-      error.currentTarget && error.currentTarget.src
-    ];
-
-    for (const candidate of candidates) {
-      if (typeof candidate === 'string' && candidate.trim()) {
-        return candidate.trim();
-      }
-    }
-
-    try {
-      return JSON.stringify(error);
-    } catch (_jsonError) {
-      return Object.prototype.toString.call(error);
-    }
-  }
-
-  return String(error);
 };
 
-const formatErrorMessage = (error) => {
-  const rawMessage = describeError(error) || getLastMeaningfulLog() || 'Unknown error';
-
-  if (typeof rawMessage !== 'string') {
-    return 'Resize failed. Please try a smaller MP4 or refresh the page.';
+const clearPolling = () => {
+  if (activePollTimer) {
+    clearTimeout(activePollTimer);
+    activePollTimer = undefined;
   }
-
-  if (rawMessage.includes('SharedArrayBuffer')) {
-    return 'Resize failed because this browser tab is missing SharedArrayBuffer support. Try Chrome or Edge over http://localhost.';
-  }
-
-  if (rawMessage.includes('ERR_REQUEST_RANGE_NOT_SATISFIABLE') || rawMessage.includes('Failed to fetch')) {
-    return 'Resize failed while loading ffmpeg files. Refresh the page and try again.';
-  }
-
-  if (rawMessage.includes('Invalid data found when processing input')) {
-    return 'Resize failed because the file could not be decoded. Try another video format or a different file.';
-  }
-
-  if (rawMessage.includes('Aborted')) {
-    const detail = getLastMeaningfulLog();
-    if (detail && detail !== rawMessage) {
-      return `Resize failed: ${detail}`;
-    }
-
-    return 'Resize failed because the browser ran out of room while encoding. Try a smaller video or a smaller output size like 720p.';
-  }
-
-  if (rawMessage.includes('createObjectURL') || rawMessage.includes('blob:')) {
-    return 'Resize failed while preparing FFmpeg in this browser tab. Refresh the page and try again.';
-  }
-
-  if (rawMessage.includes('404') || rawMessage.includes('ERR_ABORTED')) {
-    return 'Resize failed because an FFmpeg file could not be loaded from the CDN. Refresh the page and try again.';
-  }
-
-  return `Resize failed: ${rawMessage}`;
 };
 
-const resetLoadedVideo = () => {
-  clearObjectUrl(outputUrl);
-  clearObjectUrl(previewUrl);
-  outputUrl = undefined;
-  previewUrl = undefined;
+const resetDownloadState = () => {
+  downloadLink.removeAttribute('href');
   downloadLink.classList.add('hidden');
 };
 
-const handleSelectedFile = (file) => {
-  resetLoadedVideo();
+const resetJobState = () => {
+  clearPolling();
+  currentJobId = undefined;
+  setJobMeta('');
+  resetDownloadState();
+};
+
+const applyPreset = (value) => {
+  if (value === 'custom') return;
+  const [w, h] = value.split('x').map(Number);
+  widthInput.value = w;
+  heightInput.value = h;
+};
+
+const getRequestUrl = (path) => {
+  if (!APP_CONFIG.apiBaseUrl) return '';
+  return new URL(path, APP_CONFIG.apiBaseUrl).href;
+};
+
+const requestJson = async (url, options = {}) => {
+  const response = await fetch(url, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    },
+    ...options
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Request failed with status ${response.status}`);
+  }
+
+  return response.json();
+};
+
+const updateSelectedFile = (file) => {
+  resetJobState();
   selectedFile = file;
 
   if (!selectedFile) {
@@ -189,236 +145,190 @@ const handleSelectedFile = (file) => {
   }
 
   if (selectedFile.size > MAX_FILE_SIZE_BYTES) {
-    const maxSizeText = formatFileSize(MAX_FILE_SIZE_BYTES);
     const selectedSizeText = formatFileSize(selectedFile.size);
+    const maxSizeText = formatFileSize(MAX_FILE_SIZE_BYTES);
     selectedFile = undefined;
     videoInput.value = '';
     preview.removeAttribute('src');
     previewWrap.classList.add('hidden');
     resizeBtn.disabled = true;
-    setStatus(`This file is ${selectedSizeText}. The experimental upload cap is ${maxSizeText}.`);
+    setStatus(`This file is ${selectedSizeText}. The frontend cap is ${maxSizeText}.`);
     return;
   }
 
+  clearObjectUrl(previewUrl);
   previewUrl = URL.createObjectURL(selectedFile);
   preview.src = previewUrl;
   previewWrap.classList.remove('hidden');
   resizeBtn.disabled = false;
-  const selectedSizeText = formatFileSize(selectedFile.size);
-  if (selectedFile.size > 250 * 1024 * 1024) {
-    setStatus(`Loaded: ${selectedFile.name} (${selectedSizeText}). Large files may still fail in-browser even though uploads up to 2 GB are allowed.`);
-  } else {
-    setStatus(`Loaded: ${selectedFile.name} (${selectedSizeText}).`);
-  }
+  setStatus(`Loaded: ${selectedFile.name} (${formatFileSize(selectedFile.size)}).`);
+  setJobMeta('Ready to create a remote processing job.');
 };
 
-const getScaleFilter = ({ width, height, mode }) => {
-  if (mode === 'stretch') {
-    return `scale=${width}:${height}`;
+const getResizePayload = () => {
+  const width = Number(widthInput.value);
+  const height = Number(heightInput.value);
+
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 32 || height < 32) {
+    throw new Error('Width and height must be valid numbers above 32.');
   }
 
-  if (mode === 'cover') {
-    return `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
-  }
-
-  return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
-};
-
-const roundToEven = (value) => Math.max(32, Math.round(value / 2) * 2);
-
-const getFallbackDimensions = (width, height) => {
-  const maxEdge = 854;
-  const longestEdge = Math.max(width, height);
-
-  if (longestEdge <= maxEdge) {
-    return { width, height };
-  }
-
-  const ratio = maxEdge / longestEdge;
   return {
-    width: roundToEven(width * ratio),
-    height: roundToEven(height * ratio)
+    width,
+    height,
+    fitMode: fitMode.value
   };
 };
 
-const buildEncodeArgs = ({
-  inputName,
-  outputName,
-  width,
-  height,
-  mode,
-  crf,
-  preset,
-  audioBitrate,
-  frameRate,
-  includeAudio
-}) => {
-  const args = [
-    '-i',
-    inputName,
-    '-vf',
-    getScaleFilter({ width, height, mode }),
-    '-threads',
-    '1',
-    '-r',
-    String(frameRate),
-    '-c:v',
-    'libx264',
-    '-preset',
-    preset,
-    '-crf',
-    String(crf),
-    '-pix_fmt',
-    'yuv420p'
-  ];
-
-  if (includeAudio) {
-    args.push('-c:a', 'aac', '-b:a', audioBitrate);
-  } else {
-    args.push('-an');
+const createRemoteJob = async (file, resize) => {
+  if (!APP_CONFIG.apiBaseUrl) {
+    throw new Error(
+      'No backend is configured yet. Set window.APP_CONFIG.apiBaseUrl and connect this frontend to a large-file processing service.'
+    );
   }
 
-  args.push('-movflags', '+faststart', outputName);
-  return args;
-};
-
-const isMemoryAbort = (error) => {
-  const message = `${describeError(error)} ${getLastMeaningfulLog()}`.toLowerCase();
-  return message.includes('aborted') || message.includes('memory') || message.includes('out of bounds');
-};
-
-const tryEncodeProfile = async (ff, profile) => {
-  rememberFfmpegMessage(`Trying ${profile.label}...`);
-  setStatus(profile.status);
-
-  const exitCode = await ff.exec(
-    buildEncodeArgs({
-      inputName: profile.inputName,
-      outputName: profile.outputName,
-      width: profile.width,
-      height: profile.height,
-      mode: profile.mode,
-      crf: profile.crf,
-      preset: profile.preset,
-      audioBitrate: profile.audioBitrate,
-      frameRate: profile.frameRate,
-      includeAudio: profile.includeAudio
+  const url = getRequestUrl(APP_CONFIG.createJobPath);
+  return requestJson(url, {
+    method: 'POST',
+    body: JSON.stringify({
+      input: {
+        filename: file.name,
+        size: file.size,
+        type: file.type || 'application/octet-stream'
+      },
+      output: resize
     })
-  );
-
-  if (exitCode !== 0) {
-    throw new Error(getLastMeaningfulLog() || `FFmpeg exited with code ${exitCode}`);
-  }
-
-  const data = await ff.readFile(profile.outputName);
-  if (!(data instanceof Uint8Array) || data.byteLength === 0) {
-    throw new Error('The resized video came back empty.');
-  }
-
-  return data;
+  });
 };
 
-const resizeWithFallbacks = async (ff, options) => {
-  const reduced = getFallbackDimensions(options.width, options.height);
-  const profiles = [
-    {
-      ...options,
-      label: 'standard resize',
-      status: 'Resizing video...',
-      crf: 24,
-      preset: 'ultrafast',
-      audioBitrate: '96k',
-      frameRate: 30,
-      includeAudio: true,
-      finalWidth: options.width,
-      finalHeight: options.height
-    },
-    {
-      ...options,
-      label: 'memory saver resize',
-      status: 'Retrying with memory saver settings...',
-      crf: 30,
-      preset: 'ultrafast',
-      audioBitrate: '64k',
-      frameRate: 24,
-      includeAudio: false,
-      finalWidth: options.width,
-      finalHeight: options.height
+const uploadFileToJob = (file, job) =>
+  new Promise((resolve, reject) => {
+    if (!job.uploadUrl) {
+      reject(new Error('The backend did not return an uploadUrl.'));
+      return;
     }
-  ];
 
-  if (reduced.width !== options.width || reduced.height !== options.height) {
-    profiles.push({
-      ...options,
-      width: reduced.width,
-      height: reduced.height,
-      label: 'smaller fallback resize',
-      status: `Retrying at a smaller size (${reduced.width}x${reduced.height})...`,
-      crf: 30,
-      preset: 'ultrafast',
-      audioBitrate: '64k',
-      frameRate: 24,
-      includeAudio: false,
-      finalWidth: reduced.width,
-      finalHeight: reduced.height
+    const xhr = new XMLHttpRequest();
+    const method = job.uploadMethod || APP_CONFIG.uploadMethod || 'PUT';
+
+    xhr.open(method, job.uploadUrl, true);
+
+    const headers = job.uploadHeaders || {};
+    Object.entries(headers).forEach(([key, value]) => {
+      xhr.setRequestHeader(key, value);
     });
-  }
 
-  let lastError;
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const percent = Math.round((event.loaded / event.total) * 100);
+      setStatus(`Uploading video... ${percent}%`);
+    };
 
-  for (const profile of profiles) {
-    try {
-      const data = await tryEncodeProfile(ff, profile);
-      return {
-        data,
-        width: profile.finalWidth,
-        height: profile.finalHeight,
-        usedFallback: profile.label !== 'standard resize'
-      };
-    } catch (error) {
-      lastError = error;
-      await deleteTempFile(ff, profile.outputName);
-
-      if (!isMemoryAbort(error)) {
-        throw error;
+    xhr.onerror = () => reject(new Error('Upload failed.'));
+    xhr.onabort = () => reject(new Error('Upload was cancelled.'));
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error(`Upload failed with status ${xhr.status}.`));
       }
-    }
-  }
+    };
 
-  throw lastError;
+    xhr.send(file);
+  });
+
+const getStatusUrl = (job) => {
+  if (job.statusUrl) return job.statusUrl;
+  const template = APP_CONFIG.defaultStatusPath || '/jobs/{jobId}';
+  return getRequestUrl(template.replace('{jobId}', job.jobId));
 };
 
-const loadFfmpeg = async () => {
-  if (ffmpeg) return ffmpeg;
+const pollJob = async (job) => {
+  const statusUrl = getStatusUrl(job);
+  if (!statusUrl) {
+    throw new Error('No status URL is configured for this job.');
+  }
 
-  ffmpeg = new FFmpeg();
-  ffmpeg.on('log', ({ message }) => {
-    rememberFfmpegMessage(message);
+  const payload = await requestJson(statusUrl, { method: 'GET', headers: {} });
+  const state = payload.state || payload.status || 'unknown';
 
-    if (message && message.includes('time=')) {
-      setStatus('Processing...');
+  if (payload.message) {
+    setJobMeta(payload.message);
+  } else {
+    setJobMeta(`Job ${job.jobId}: ${state}`);
+  }
+
+  if (state === 'completed') {
+    const downloadUrl = payload.downloadUrl || payload.outputUrl;
+    if (!downloadUrl) {
+      throw new Error('The job completed but no download URL was returned.');
     }
-  });
 
-  setStatus('Loading encoder (first run can take 10-20 seconds)...');
-  const baseUrl = new URL('./vendor/ffmpeg', window.location.href).href;
-  await ffmpeg.load({
-    coreURL: `${baseUrl}/ffmpeg-core.js`,
-    wasmURL: `${baseUrl}/ffmpeg-core.wasm`
-  });
+    downloadLink.href = downloadUrl;
+    downloadLink.download = payload.filename || 'resized.mp4';
+    downloadLink.classList.remove('hidden');
+    setStatus('Done! Your processed video is ready to download.');
+    return;
+  }
 
-  return ffmpeg;
+  if (state === 'failed' || state === 'error') {
+    throw new Error(payload.error || payload.message || 'The backend reported that processing failed.');
+  }
+
+  setStatus(`Processing remotely... ${state}`);
+  activePollTimer = setTimeout(() => {
+    pollJob(job).catch((error) => {
+      resizeBtn.disabled = false;
+      setStatus(`Resize failed: ${describeError(error)}`);
+    });
+  }, POLL_INTERVAL_MS);
+};
+
+const queueRemoteResize = async () => {
+  if (!selectedFile) return;
+
+  resizeBtn.disabled = true;
+  resetDownloadState();
+  clearPolling();
+
+  try {
+    const resize = getResizePayload();
+    setStatus('Creating remote job...');
+    const job = await createRemoteJob(selectedFile, resize);
+
+    currentJobId = job.jobId || job.id;
+    if (!currentJobId) {
+      throw new Error('The backend did not return a job id.');
+    }
+
+    setJobMeta(`Job ${currentJobId} created. Upload target is ready.`);
+    await uploadFileToJob(selectedFile, job);
+
+    if (job.startUrl) {
+      setStatus('Starting remote processing...');
+      await requestJson(job.startUrl, {
+        method: 'POST',
+        body: JSON.stringify({ jobId: currentJobId })
+      });
+    }
+
+    setStatus('Upload complete. Waiting for remote processor...');
+    await pollJob({ ...job, jobId: currentJobId });
+  } catch (error) {
+    resizeBtn.disabled = false;
+    setStatus(`Resize failed: ${describeError(error)}`);
+    return;
+  }
+
+  resizeBtn.disabled = false;
 };
 
 presetSelect.addEventListener('change', () => {
-  if (presetSelect.value === 'custom') return;
-  const [w, h] = presetSelect.value.split('x').map(Number);
-  widthInput.value = w;
-  heightInput.value = h;
+  applyPreset(presetSelect.value);
 });
 
 videoInput.addEventListener('change', () => {
-  handleSelectedFile(videoInput.files?.[0]);
+  updateSelectedFile(videoInput.files?.[0]);
 });
 
 ['dragenter', 'dragover'].forEach((eventName) => {
@@ -436,62 +346,9 @@ videoInput.addEventListener('change', () => {
 });
 
 dropZone.addEventListener('drop', (event) => {
-  const file = event.dataTransfer?.files?.[0];
-  handleSelectedFile(file);
+  updateSelectedFile(event.dataTransfer?.files?.[0]);
 });
 
-resizeBtn.addEventListener('click', async () => {
-  if (!selectedFile) return;
-
-  const width = Number(widthInput.value);
-  const height = Number(heightInput.value);
-
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 32 || height < 32) {
-    setStatus('Width and height must be valid numbers above 32.');
-    return;
-  }
-
-  resizeBtn.disabled = true;
-  lastFfmpegMessage = '';
-  ffmpegLogHistory = [];
-
-  try {
-    const ff = await loadFfmpeg();
-
-    setStatus('Reading video...');
-    const safeName = selectedFile.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const inputName = `input_${Date.now()}_${safeName}`;
-    const outputName = `resized_${width}x${height}.mp4`;
-
-    await ff.writeFile(inputName, await fetchFile(selectedFile));
-
-    const result = await resizeWithFallbacks(ff, {
-      inputName,
-      outputName,
-      width,
-      height,
-      mode: fitMode.value
-    });
-
-    clearObjectUrl(outputUrl);
-    outputUrl = URL.createObjectURL(new Blob([result.data], { type: 'video/mp4' }));
-
-    downloadLink.href = outputUrl;
-    downloadLink.download = `resized_${result.width}x${result.height}.mp4`;
-    downloadLink.classList.remove('hidden');
-
-    if (result.usedFallback) {
-      setStatus(`Done! Your resized video is ready. A lighter fallback mode was used (${result.width}x${result.height}).`);
-    } else {
-      setStatus('Done! Your resized video is ready to download.');
-    }
-
-    await deleteTempFile(ff, inputName);
-    await deleteTempFile(ff, outputName);
-  } catch (error) {
-    console.error(error);
-    setStatus(formatErrorMessage(error));
-  } finally {
-    resizeBtn.disabled = false;
-  }
+resizeBtn.addEventListener('click', () => {
+  queueRemoteResize();
 });

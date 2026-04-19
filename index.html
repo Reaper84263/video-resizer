@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video Resizer</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="./vendor/ffmpeg/ffmpeg-util.js"></script>
+    <script src="./vendor/ffmpeg/ffmpeg.js"></script>
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <h1>Video Resizer</h1>
+        <p>Resize videos in your browser and download the converted file.</p>
+      </header>
+
+      <section class="card">
+        <label id="dropZone" class="file-input" for="videoInput">
+          <span class="file-input-title">Select or drop a video</span>
+          <span class="file-input-subtitle">Drag a video file here, or click to browse.</span>
+          <input id="videoInput" type="file" accept="video/*" />
+        </label>
+
+        <div id="previewWrap" class="preview-wrap hidden">
+          <video id="preview" controls></video>
+        </div>
+
+        <div class="controls">
+          <div class="grid">
+            <label>
+              Preset
+              <select id="preset">
+                <option value="custom">Custom</option>
+                <option value="1920x1080">1080p (1920×1080)</option>
+                <option value="1280x720">720p (1280×720)</option>
+                <option value="1080x1080">Square (1080×1080)</option>
+                <option value="1080x1920">Vertical (1080×1920)</option>
+                <option value="640x640">1:1 Small (640×640)</option>
+              </select>
+            </label>
+
+            <label>
+              Width
+              <input id="width" type="number" min="32" step="2" value="1280" />
+            </label>
+
+            <label>
+              Height
+              <input id="height" type="number" min="32" step="2" value="720" />
+            </label>
+
+            <label>
+              Fit Mode
+              <select id="fitMode">
+                <option value="contain">Contain (pad)</option>
+                <option value="cover">Cover (crop)</option>
+                <option value="stretch">Stretch</option>
+              </select>
+            </label>
+          </div>
+
+          <button id="resizeBtn" disabled>Resize Video</button>
+        </div>
+
+        <div id="status" class="status">Load a video to begin.</div>
+
+        <a id="downloadLink" class="download hidden" download="resized.mp4">Download resized video</a>
+      </section>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>

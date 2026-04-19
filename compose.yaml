@@ -13,6 +13,10 @@ services:
       HOST: "0.0.0.0"
       PUBLIC_BASE_URL: "http://localhost:3001"
       FFMPEG_USE_NVIDIA: "true"
+      FFMPEG_CPU_PRESET: "superfast"
+      FFMPEG_NVENC_PRESET: "p2"
+      FFMPEG_VIDEO_QUALITY: "23"
+      FFMPEG_THREADS: "0"
       NVIDIA_VISIBLE_DEVICES: "all"
       NVIDIA_DRIVER_CAPABILITIES: "compute,video,utility"
     gpus: all

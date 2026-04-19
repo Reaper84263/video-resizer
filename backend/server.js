@@ -13,6 +13,10 @@ const DATA_ROOT = path.join(__dirname, 'data');
 const JOBS_DIR = path.join(DATA_ROOT, 'jobs');
 const INPUTS_DIR = path.join(DATA_ROOT, 'inputs');
 const OUTPUTS_DIR = path.join(DATA_ROOT, 'outputs');
+const FFMPEG_THREADS = Number.parseInt(process.env.FFMPEG_THREADS || '0', 10);
+const FFMPEG_CPU_PRESET = process.env.FFMPEG_CPU_PRESET || 'superfast';
+const FFMPEG_NVENC_PRESET = process.env.FFMPEG_NVENC_PRESET || 'p2';
+const FFMPEG_VIDEO_QUALITY = Number.parseInt(process.env.FFMPEG_VIDEO_QUALITY || '23', 10);
 const FFMPEG_CANDIDATES = [
   process.env.FFMPEG_PATH,
   path.join(
@@ -128,15 +132,32 @@ const createScaleFilter = ({ width, height, fitMode }) => {
   return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
 };
 
+const createGpuScaleFilter = ({ width, height, fitMode }) => {
+  if (fitMode === 'stretch') {
+    return `scale_cuda=${width}:${height}`;
+  }
+
+  if (fitMode === 'cover') {
+    return `scale_cuda=${width}:${height}:force_original_aspect_ratio=increase,hwdownload,format=nv12,crop=${width}:${height}`;
+  }
+
+  return `scale_cuda=${width}:${height}:force_original_aspect_ratio=decrease,hwdownload,format=nv12,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
+};
+
+const createFilterArgs = (output, useNvidia) => [
+  '-vf',
+  useNvidia ? createGpuScaleFilter(output) : createScaleFilter(output)
+];
+
 const createVideoEncodingArgs = (useNvidia) => {
   if (useNvidia) {
     return [
       '-c:v',
       'h264_nvenc',
       '-preset',
-      'p4',
+      FFMPEG_NVENC_PRESET,
       '-cq',
-      '23'
+      String(FFMPEG_VIDEO_QUALITY)
     ];
   }
 
@@ -144,24 +165,36 @@ const createVideoEncodingArgs = (useNvidia) => {
     '-c:v',
     'libx264',
     '-preset',
-    'veryfast',
+    FFMPEG_CPU_PRESET,
     '-crf',
-    '23'
+    String(FFMPEG_VIDEO_QUALITY)
   ];
 };
 
 const shouldRetryOnCpu = (stderr) =>
-  /h264_nvenc|nvenc|cuda|libcuda|no capable devices found|cannot load/i.test(stderr || '');
+  /h264_nvenc|nvenc|cuda|libcuda|scale_cuda|hwdownload|no capable devices found|cannot load|Error reinitializing filters|Function not implemented/i.test(
+    stderr || ''
+  );
+
+const createInputArgs = (useNvidia) => {
+  if (!useNvidia) {
+    return [];
+  }
+
+  return ['-hwaccel', 'cuda'];
+};
 
 const runFfmpegJob = ({ ffmpegPath, job, durationSeconds, useNvidia }) =>
   new Promise((resolve, reject) => {
     const ffmpegArgs = [
       '-y',
+      ...createInputArgs(useNvidia),
       '-i',
       job.inputPath,
-      '-vf',
-      createScaleFilter(job.output),
+      ...createFilterArgs(job.output, useNvidia),
       ...createVideoEncodingArgs(useNvidia),
+      '-threads',
+      String(Number.isFinite(FFMPEG_THREADS) ? Math.max(0, FFMPEG_THREADS) : 0),
       '-pix_fmt',
       'yuv420p',
       '-c:a',

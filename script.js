@@ -18,6 +18,7 @@ let selectedFile;
 let outputUrl;
 let previewUrl;
 let lastFfmpegMessage = '';
+let ffmpegLogHistory = [];
 
 const setStatus = (message) => {
   statusEl.textContent = message;
@@ -27,6 +28,36 @@ const clearObjectUrl = (url) => {
   if (url) {
     URL.revokeObjectURL(url);
   }
+};
+
+const rememberFfmpegMessage = (message) => {
+  if (!message) return;
+
+  lastFfmpegMessage = message;
+
+  const trimmed = message.trim();
+  if (!trimmed) return;
+
+  ffmpegLogHistory.push(trimmed);
+  if (ffmpegLogHistory.length > 12) {
+    ffmpegLogHistory = ffmpegLogHistory.slice(-12);
+  }
+};
+
+const getLastMeaningfulLog = () => {
+  for (let index = ffmpegLogHistory.length - 1; index >= 0; index -= 1) {
+    const message = ffmpegLogHistory[index];
+    if (
+      message &&
+      !message.includes('time=') &&
+      !message.includes('frame=') &&
+      !message.startsWith('video:')
+    ) {
+      return message;
+    }
+  }
+
+  return lastFfmpegMessage;
 };
 
 const deleteTempFile = async (ff, path) => {
@@ -72,7 +103,7 @@ const describeError = (error) => {
 };
 
 const formatErrorMessage = (error) => {
-  const rawMessage = describeError(error) || lastFfmpegMessage || 'Unknown error';
+  const rawMessage = describeError(error) || getLastMeaningfulLog() || 'Unknown error';
 
   if (typeof rawMessage !== 'string') {
     return 'Resize failed. Please try a smaller MP4 or refresh the page.';
@@ -88,6 +119,15 @@ const formatErrorMessage = (error) => {
 
   if (rawMessage.includes('Invalid data found when processing input')) {
     return 'Resize failed because the file could not be decoded. Try another video format or a different file.';
+  }
+
+  if (rawMessage.includes('Aborted')) {
+    const detail = getLastMeaningfulLog();
+    if (detail && detail !== rawMessage) {
+      return `Resize failed: ${detail}`;
+    }
+
+    return 'Resize failed because the browser ran out of room while encoding. Try a smaller video or a smaller output size like 720p.';
   }
 
   if (rawMessage.includes('createObjectURL') || rawMessage.includes('blob:')) {
@@ -155,9 +195,7 @@ const loadFfmpeg = async () => {
 
   ffmpeg = new FFmpeg();
   ffmpeg.on('log', ({ message }) => {
-    if (message) {
-      lastFfmpegMessage = message;
-    }
+    rememberFfmpegMessage(message);
 
     if (message && message.includes('time=')) {
       setStatus('Processing...');
@@ -217,6 +255,7 @@ resizeBtn.addEventListener('click', async () => {
 
   resizeBtn.disabled = true;
   lastFfmpegMessage = '';
+  ffmpegLogHistory = [];
 
   try {
     const ff = await loadFfmpeg();
@@ -236,21 +275,27 @@ resizeBtn.addEventListener('click', async () => {
       inputName,
       '-vf',
       vf,
+      '-threads',
+      '1',
       '-c:v',
       'libx264',
       '-preset',
-      'veryfast',
+      'ultrafast',
       '-crf',
-      '22',
+      '24',
+      '-pix_fmt',
+      'yuv420p',
       '-c:a',
       'aac',
       '-b:a',
-      '128k',
+      '96k',
+      '-movflags',
+      '+faststart',
       outputName
     ]);
 
     if (exitCode !== 0) {
-      throw new Error(lastFfmpegMessage || `FFmpeg exited with code ${exitCode}`);
+      throw new Error(getLastMeaningfulLog() || `FFmpeg exited with code ${exitCode}`);
     }
 
     const data = await ff.readFile(outputName);

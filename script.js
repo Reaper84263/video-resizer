@@ -157,10 +157,8 @@ const loadFfmpeg = async () => {
   });
 
   setStatus('Loading encoder (first run can take 10-20 seconds)...');
-  const ffmpegBaseUrl = new URL('./vendor/ffmpeg', window.location.href).href;
   const baseUrl = new URL('./vendor/ffmpeg', window.location.href).href;
   await ffmpeg.load({
-    classWorkerURL: `${ffmpegBaseUrl}/814.ffmpeg.js`,
     coreURL: `${baseUrl}/ffmpeg-core.js`,
     wasmURL: `${baseUrl}/ffmpeg-core.wasm`
   });

@@ -29,6 +29,14 @@ const clearObjectUrl = (url) => {
   }
 };
 
+const deleteTempFile = async (ff, path) => {
+  try {
+    await ff.deleteFile(path);
+  } catch (_error) {
+    // Ignore cleanup failures for files that were never created.
+  }
+};
+
 const describeError = (error) => {
   if (!error) return '';
   if (typeof error === 'string') return error;
@@ -223,7 +231,7 @@ resizeBtn.addEventListener('click', async () => {
     const vf = getScaleFilter({ width, height, mode: fitMode.value });
 
     setStatus('Resizing video...');
-    await ff.exec([
+    const exitCode = await ff.exec([
       '-i',
       inputName,
       '-vf',
@@ -241,10 +249,18 @@ resizeBtn.addEventListener('click', async () => {
       outputName
     ]);
 
+    if (exitCode !== 0) {
+      throw new Error(lastFfmpegMessage || `FFmpeg exited with code ${exitCode}`);
+    }
+
     const data = await ff.readFile(outputName);
 
+    if (!(data instanceof Uint8Array) || data.byteLength === 0) {
+      throw new Error('The resized video came back empty.');
+    }
+
     clearObjectUrl(outputUrl);
-    outputUrl = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
+    outputUrl = URL.createObjectURL(new Blob([data], { type: 'video/mp4' }));
 
     downloadLink.href = outputUrl;
     downloadLink.download = outputName;
@@ -252,8 +268,8 @@ resizeBtn.addEventListener('click', async () => {
 
     setStatus('Done! Your resized video is ready to download.');
 
-    await ff.deleteFile(inputName);
-    await ff.deleteFile(outputName);
+    await deleteTempFile(ff, inputName);
+    await deleteTempFile(ff, outputName);
   } catch (error) {
     console.error(error);
     setStatus(formatErrorMessage(error));

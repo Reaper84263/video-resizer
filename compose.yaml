@@ -1,0 +1,24 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: video-resizer-backend
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: "3001"
+      HOST: "0.0.0.0"
+      PUBLIC_BASE_URL: "http://localhost:3001"
+    volumes:
+      - ./backend/data:/app/backend/data
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: video-resizer-frontend
+    ports:
+      - "8080:8080"
+    depends_on:
+      - backend

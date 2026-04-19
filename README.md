@@ -31,6 +31,21 @@ npm run backend
 
 The frontend auto-connects to `http://localhost:3001` when opened from `localhost` or `127.0.0.1`.
 
+## Fastest Working Path On Windows
+
+If native Node child-process spawning is blocked on your Windows setup, the fastest reliable path is Docker.
+
+1. Install Docker Desktop.
+2. From the repo root, run:
+   ```bash
+   docker compose up --build
+   ```
+3. Open:
+   - frontend: `http://localhost:8080`
+   - backend health: `http://localhost:3001/health`
+
+This runs the backend in a Linux container with `ffmpeg` installed, which avoids the local Windows `spawn EPERM` problem.
+
 ## Deploy
 
 This project is now a static frontend plus a local/backend scaffold. The frontend can still be deployed directly to Vercel, but actual uploads and processing require a separate backend service.
@@ -56,6 +71,7 @@ Important:
 - `ffmpeg` must be installed on the backend machine and available on `PATH`
 - uploads are stored on local disk under `backend/data/`
 - this is a good local/dev scaffold, not a final production storage design for Vercel
+- Docker support is included via `compose.yaml`, `backend/Dockerfile`, and `frontend/Dockerfile`
 
 The frontend currently expects this contract:
 

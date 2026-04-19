@@ -2,7 +2,10 @@
   "name": "video-resizer",
   "private": true,
   "version": "1.0.0",
-  "description": "Browser-based video resizer powered by ffmpeg.wasm",
+  "description": "Large-file video resizer frontend and backend scaffold",
+  "scripts": {
+    "backend": "node backend/server.js"
+  },
   "dependencies": {
     "@ffmpeg/core": "0.12.10",
     "@ffmpeg/ffmpeg": "0.12.10",

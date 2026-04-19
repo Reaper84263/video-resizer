@@ -23,13 +23,39 @@ python3 -m http.server 8080
 
 Then open: `http://localhost:8080`
 
+To run the backend locally in a second terminal:
+
+```bash
+npm run backend
+```
+
+The frontend auto-connects to `http://localhost:3001` when opened from `localhost` or `127.0.0.1`.
+
 ## Deploy
 
-This project is now a static frontend, so it can be deployed directly to Vercel. The site still needs a separate large-file backend for actual uploads and processing.
+This project is now a static frontend plus a local/backend scaffold. The frontend can still be deployed directly to Vercel, but actual uploads and processing require a separate backend service.
 
 ## Configure A Backend
 
 Edit `config.js` and set `window.APP_CONFIG.apiBaseUrl` to your processing API.
+
+## Local Backend Notes
+
+The backend scaffold lives in [backend/server.js](/c:/Users/bgian/OneDrive/Documents/GitHub/video-resizer/backend/server.js:1).
+
+It currently:
+
+- creates jobs with `POST /jobs`
+- accepts raw file uploads with `PUT /uploads/:jobId`
+- tracks job state with `GET /jobs/:jobId`
+- serves completed outputs with `GET /downloads/:jobId`
+- runs native `ffmpeg` on the backend machine after upload completes
+
+Important:
+
+- `ffmpeg` must be installed on the backend machine and available on `PATH`
+- uploads are stored on local disk under `backend/data/`
+- this is a good local/dev scaffold, not a final production storage design for Vercel
 
 The frontend currently expects this contract:
 
@@ -93,6 +119,15 @@ The frontend currently expects this contract:
      "error": "Transcoding failed"
    }
    ```
+
+## Production Direction
+
+For a true large-file deployment, the next step is replacing local disk storage with object storage and moving the processor to a real server or worker environment. A practical setup is:
+
+1. Vercel frontend
+2. backend API on a VM/container
+3. S3-compatible object storage
+4. FFmpeg worker that reads from storage and writes the output back
 
 ## What to do next
 

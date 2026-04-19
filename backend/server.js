@@ -13,6 +13,20 @@ const DATA_ROOT = path.join(__dirname, 'data');
 const JOBS_DIR = path.join(DATA_ROOT, 'jobs');
 const INPUTS_DIR = path.join(DATA_ROOT, 'inputs');
 const OUTPUTS_DIR = path.join(DATA_ROOT, 'outputs');
+const FFMPEG_CANDIDATES = [
+  process.env.FFMPEG_PATH,
+  'ffmpeg',
+  path.join(
+    process.env.LOCALAPPDATA || '',
+    'Microsoft',
+    'WinGet',
+    'Packages',
+    'Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe',
+    'ffmpeg-8.1-full_build',
+    'bin',
+    'ffmpeg.exe'
+  )
+].filter(Boolean);
 
 const json = (res, statusCode, payload) => {
   res.writeHead(statusCode, {
@@ -37,6 +51,23 @@ const sendText = (res, statusCode, message) => {
 const sanitizeFilename = (name) => {
   const safe = (name || 'upload.mp4').replace(/[^a-zA-Z0-9._-]/g, '_');
   return safe || 'upload.mp4';
+};
+
+const resolveFfmpegPath = async () => {
+  for (const candidate of FFMPEG_CANDIDATES) {
+    if (candidate === 'ffmpeg') {
+      return candidate;
+    }
+
+    try {
+      await fsp.access(candidate);
+      return candidate;
+    } catch (_error) {
+      // Try next candidate.
+    }
+  }
+
+  return 'ffmpeg';
 };
 
 const ensureDirectories = async () => {
@@ -86,6 +117,7 @@ const processJob = async (jobId) => {
     state: 'processing',
     message: 'FFmpeg worker started.'
   });
+  const ffmpegPath = await resolveFfmpegPath();
 
   const ffmpegArgs = [
     '-y',
@@ -112,7 +144,7 @@ const processJob = async (jobId) => {
     job.outputPath
   ];
 
-  const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
+  const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
     windowsHide: true
   });
 
@@ -128,7 +160,7 @@ const processJob = async (jobId) => {
       message: 'FFmpeg could not be started.',
       error:
         error.code === 'ENOENT'
-          ? 'FFmpeg is not installed on the backend machine. Install ffmpeg and retry the job.'
+          ? 'FFmpeg is not available to the backend process. Set FFMPEG_PATH or restart the backend shell after installation.'
           : error.message
     });
   });
@@ -335,8 +367,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname === '/health') {
       json(res, 200, {
         ok: true,
-        ffmpegInstalled: false,
-        note: 'The backend is running. Install ffmpeg on this machine to enable actual video processing.'
+        ffmpegCandidates: FFMPEG_CANDIDATES,
+        note: 'The backend is running. Processing uses ffmpeg from PATH or FFMPEG_PATH, with a WinGet fallback on this machine.'
       });
       return;
     }
